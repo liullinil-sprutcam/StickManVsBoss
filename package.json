@@ -1,0 +1,12 @@
+{
+  "name": "stickman-vs-boss",
+  "version": "1.0.0",
+  "description": "Stickman vs Boss - mobile browser game on Three.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "echo 'No build step needed'"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
