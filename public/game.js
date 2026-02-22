@@ -1,414 +1,727 @@
-import * as THREE from 'three';
-
 // ============================================================
-// Scene setup
+// StickMan vs Boss — 2D Side-Scroller with break-apart mechanic
 // ============================================================
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb); // sky blue
-scene.fog = new THREE.Fog(0x87ceeb, 30, 60);
 
-const camera = new THREE.PerspectiveCamera(
-  50,
-  window.innerWidth / window.innerHeight,
-  0.1,
-  100
-);
-camera.position.set(0, 6, 12);
-camera.lookAt(0, 1.5, 0);
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-document.body.appendChild(renderer.domElement);
-
-// ============================================================
-// Lighting
-// ============================================================
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-scene.add(ambientLight);
-
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-dirLight.position.set(5, 10, 7);
-dirLight.castShadow = true;
-dirLight.shadow.mapSize.set(1024, 1024);
-dirLight.shadow.camera.near = 0.5;
-dirLight.shadow.camera.far = 30;
-dirLight.shadow.camera.left = -10;
-dirLight.shadow.camera.right = 10;
-dirLight.shadow.camera.top = 10;
-dirLight.shadow.camera.bottom = -10;
-scene.add(dirLight);
-
-// ============================================================
-// Ground
-// ============================================================
-const groundGeo = new THREE.PlaneGeometry(40, 40);
-const groundMat = new THREE.MeshStandardMaterial({
-  color: 0x4caf50,
-  roughness: 0.9,
-});
-const ground = new THREE.Mesh(groundGeo, groundMat);
-ground.rotation.x = -Math.PI / 2;
-ground.receiveShadow = true;
-scene.add(ground);
-
-// Grid helper for visual reference
-const grid = new THREE.GridHelper(40, 40, 0x388e3c, 0x388e3c);
-grid.position.y = 0.01;
-grid.material.opacity = 0.15;
-grid.material.transparent = true;
-scene.add(grid);
-
-// ============================================================
-// Stickman builder
-// ============================================================
-const STICK_COLOR = 0x222222;
-
-function createLimb(radiusTop, radiusBottom, height) {
-  const geo = new THREE.CylinderGeometry(radiusTop, radiusBottom, height, 8);
-  const mat = new THREE.MeshStandardMaterial({ color: STICK_COLOR });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  return mesh;
+// --- Responsive sizing ---
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
 }
+resize();
+window.addEventListener('resize', resize);
 
-function createStickman() {
-  const root = new THREE.Group();
+// --- Constants ---
+const GRAVITY = 2200;
+const JUMP_FORCE = -750;
+const GROUND_Y_RATIO = 0.78;      // ground line as fraction of canvas height
+const PLAYER_X_RATIO = 0.18;      // stickman horizontal position
+const BASE_SCROLL_SPEED = 320;
+const SPEED_INCREMENT = 0.4;       // speed-up per second
+const OBSTACLE_MIN_GAP = 280;
+const OBSTACLE_MAX_GAP = 500;
+const REASSEMBLE_TIME = 1.2;       // seconds to reassemble
+const INVINCIBLE_TIME = 1.5;       // post-reassemble invincibility
+const PARTICLE_COUNT = 12;
 
-  // Head
-  const headGeo = new THREE.SphereGeometry(0.28, 16, 16);
-  const headMat = new THREE.MeshStandardMaterial({ color: STICK_COLOR });
-  const head = new THREE.Mesh(headGeo, headMat);
-  head.position.y = 2.55;
-  head.castShadow = true;
-  root.add(head);
+// --- Game state ---
+let groundY, playerX;
+let scrollSpeed;
+let score, highScore = 0;
+let gameState; // 'menu' | 'running' | 'breaking' | 'reassembling' | 'invincible'
+let stateTimer;
+let invincibleTimer;
 
-  // Eyes (white dots on face)
-  const eyeGeo = new THREE.SphereGeometry(0.05, 8, 8);
-  const eyeMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
-  const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
-  leftEye.position.set(-0.1, 2.6, 0.22);
-  root.add(leftEye);
-  const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
-  rightEye.position.set(0.1, 2.6, 0.22);
-  root.add(rightEye);
-
-  // Pupils
-  const pupilGeo = new THREE.SphereGeometry(0.025, 8, 8);
-  const pupilMat = new THREE.MeshStandardMaterial({ color: 0x000000 });
-  const leftPupil = new THREE.Mesh(pupilGeo, pupilMat);
-  leftPupil.position.set(-0.1, 2.6, 0.27);
-  root.add(leftPupil);
-  const rightPupil = new THREE.Mesh(pupilGeo, pupilMat);
-  rightPupil.position.set(0.1, 2.6, 0.27);
-  root.add(rightPupil);
-
-  // Body (torso)
-  const body = createLimb(0.06, 0.06, 1.0);
-  body.position.y = 1.8;
-  root.add(body);
-
-  // --- Arms ---
-  // Left upper arm pivot
-  const leftArmPivot = new THREE.Group();
-  leftArmPivot.position.set(-0.06, 2.25, 0);
-  root.add(leftArmPivot);
-  const leftArm = createLimb(0.04, 0.04, 0.65);
-  leftArm.position.y = -0.325;
-  leftArmPivot.add(leftArm);
-
-  // Right upper arm pivot
-  const rightArmPivot = new THREE.Group();
-  rightArmPivot.position.set(0.06, 2.25, 0);
-  root.add(rightArmPivot);
-  const rightArm = createLimb(0.04, 0.04, 0.65);
-  rightArm.position.y = -0.325;
-  rightArmPivot.add(rightArm);
-
-  // --- Legs ---
-  // Left leg pivot
-  const leftLegPivot = new THREE.Group();
-  leftLegPivot.position.set(-0.1, 1.3, 0);
-  root.add(leftLegPivot);
-  const leftLeg = createLimb(0.05, 0.05, 0.8);
-  leftLeg.position.y = -0.4;
-  leftLegPivot.add(leftLeg);
-
-  // Left lower leg pivot (knee)
-  const leftKneePivot = new THREE.Group();
-  leftKneePivot.position.set(0, -0.8, 0);
-  leftLegPivot.add(leftKneePivot);
-  const leftShin = createLimb(0.045, 0.045, 0.7);
-  leftShin.position.y = -0.35;
-  leftKneePivot.add(leftShin);
-
-  // Right leg pivot
-  const rightLegPivot = new THREE.Group();
-  rightLegPivot.position.set(0.1, 1.3, 0);
-  root.add(rightLegPivot);
-  const rightLeg = createLimb(0.05, 0.05, 0.8);
-  rightLeg.position.y = -0.4;
-  rightLegPivot.add(rightLeg);
-
-  // Right lower leg pivot (knee)
-  const rightKneePivot = new THREE.Group();
-  rightKneePivot.position.set(0, -0.8, 0);
-  rightLegPivot.add(rightKneePivot);
-  const rightShin = createLimb(0.045, 0.045, 0.7);
-  rightShin.position.y = -0.35;
-  rightKneePivot.add(rightShin);
-
-  root.userData = {
-    leftArmPivot,
-    rightArmPivot,
-    leftLegPivot,
-    rightLegPivot,
-    leftKneePivot,
-    rightKneePivot,
-  };
-
-  return root;
-}
-
-const stickman = createStickman();
-scene.add(stickman);
-
-// ============================================================
-// Walking animation
-// ============================================================
-let walkPhase = 0;
-const WALK_SPEED = 8; // phase speed
-const LEG_SWING = 0.6; // radians
-const ARM_SWING = 0.5;
-const KNEE_BEND = 0.5;
-
-function animateWalk(dt, isMoving) {
-  const { leftArmPivot, rightArmPivot, leftLegPivot, rightLegPivot, leftKneePivot, rightKneePivot } =
-    stickman.userData;
-
-  if (isMoving) {
-    walkPhase += dt * WALK_SPEED;
-  } else {
-    // Return to idle smoothly
-    walkPhase += dt * WALK_SPEED;
-    // Dampen swing amplitudes toward 0
-  }
-
-  const swing = isMoving ? 1.0 : Math.max(0, 1.0 - walkPhase * 0.1);
-  const s = Math.sin(walkPhase);
-
-  leftLegPivot.rotation.x = s * LEG_SWING * (isMoving ? 1 : 0);
-  rightLegPivot.rotation.x = -s * LEG_SWING * (isMoving ? 1 : 0);
-
-  // Knee bends only when leg is going back
-  leftKneePivot.rotation.x = isMoving ? Math.max(0, -s) * KNEE_BEND : 0;
-  rightKneePivot.rotation.x = isMoving ? Math.max(0, s) * KNEE_BEND : 0;
-
-  leftArmPivot.rotation.x = -s * ARM_SWING * (isMoving ? 1 : 0);
-  rightArmPivot.rotation.x = s * ARM_SWING * (isMoving ? 1 : 0);
-}
-
-// ============================================================
-// Touch / pointer input
-// ============================================================
-const pointer = {
-  isDown: false,
-  x: 0,
-  y: 0,
+// --- Stickman ---
+const stick = {
+  x: 0, y: 0,
+  vy: 0,
+  onGround: true,
+  runPhase: 0,
+  // Body part positions (relative offsets from root x,y which is at feet)
+  // Stored as: { id, ox, oy, w, h, type }
+  parts: [],
+  // When broken: each part becomes { ...part, bx, by, bvx, bvy, angle, angVel }
+  brokenParts: [],
 };
 
-const raycaster = new THREE.Raycaster();
-const pointerNDC = new THREE.Vector2();
-const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-const targetPos = new THREE.Vector3();
-let hasTarget = false;
-
-function screenToWorld(clientX, clientY) {
-  pointerNDC.x = (clientX / window.innerWidth) * 2 - 1;
-  pointerNDC.y = -(clientY / window.innerHeight) * 2 + 1;
-  raycaster.setFromCamera(pointerNDC, camera);
-  const hit = new THREE.Vector3();
-  raycaster.ray.intersectPlane(groundPlane, hit);
-  return hit;
+// Body part templates (offsets from feet position, y-up in canvas means negative = up)
+function getPartTemplates(scale) {
+  const s = scale;
+  return [
+    { id: 'head',     ox: 0,       oy: -s*5.8, r: s*0.55, type: 'circle' },
+    { id: 'body',     ox: 0,       oy: -s*3.6, h: s*2.0,  type: 'line' },
+    { id: 'luparm',   ox: -s*0.1,  oy: -s*4.6, h: s*1.0,  type: 'line' },
+    { id: 'lloarm',   ox: -s*0.4,  oy: -s*3.6, h: s*0.9,  type: 'line' },
+    { id: 'ruparm',   ox: s*0.1,   oy: -s*4.6, h: s*1.0,  type: 'line' },
+    { id: 'rloarm',   ox: s*0.4,   oy: -s*3.6, h: s*0.9,  type: 'line' },
+    { id: 'lupleg',   ox: -s*0.3,  oy: -s*2.6, h: s*1.2,  type: 'line' },
+    { id: 'lloleg',   ox: -s*0.4,  oy: -s*1.3, h: s*1.3,  type: 'line' },
+    { id: 'rupleg',   ox: s*0.3,   oy: -s*2.6, h: s*1.2,  type: 'line' },
+    { id: 'rloleg',   ox: s*0.4,   oy: -s*1.3, h: s*1.3,  type: 'line' },
+  ];
 }
 
-function onPointerDown(e) {
-  e.preventDefault();
-  pointer.isDown = true;
-  const touch = e.touches ? e.touches[0] : e;
-  const worldPos = screenToWorld(touch.clientX, touch.clientY);
-  if (worldPos) {
-    targetPos.copy(worldPos);
-    hasTarget = true;
+// --- Obstacles ---
+let obstacles = [];
+const OBSTACLE_TYPES = ['spike', 'box', 'sawblade'];
+
+function spawnObstacle(x) {
+  const scale = getScale();
+  const type = OBSTACLE_TYPES[Math.floor(Math.random() * OBSTACLE_TYPES.length)];
+  let w, h;
+  if (type === 'spike') {
+    w = scale * 1.5;
+    h = scale * 2.5;
+  } else if (type === 'box') {
+    w = scale * 2.0;
+    h = scale * 2.0 + Math.random() * scale * 1.5;
+  } else {
+    w = scale * 2.2;
+    h = scale * 2.2;
   }
-  // Hide hint after first touch
-  const hint = document.getElementById('hint');
-  if (hint) hint.style.display = 'none';
+  obstacles.push({ x, y: groundY - h, w, h, type, phase: Math.random() * Math.PI * 2 });
 }
 
-function onPointerMove(e) {
-  e.preventDefault();
-  if (!pointer.isDown) return;
-  const touch = e.touches ? e.touches[0] : e;
-  const worldPos = screenToWorld(touch.clientX, touch.clientY);
-  if (worldPos) {
-    targetPos.copy(worldPos);
-    hasTarget = true;
+// --- Particles ---
+let particles = [];
+
+function emitParticles(x, y) {
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 150 + Math.random() * 300;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 200,
+      life: 0.5 + Math.random() * 0.5,
+      maxLife: 0.5 + Math.random() * 0.5,
+      size: 2 + Math.random() * 4,
+      color: ['#ff4444', '#ffaa00', '#ffff44'][Math.floor(Math.random() * 3)],
+    });
   }
 }
 
-function onPointerUp(e) {
+// --- Background layers (parallax) ---
+const bgStars = [];
+for (let i = 0; i < 80; i++) {
+  bgStars.push({
+    x: Math.random(),
+    y: Math.random() * 0.7,
+    size: 0.5 + Math.random() * 1.5,
+    bright: 0.3 + Math.random() * 0.7,
+  });
+}
+
+const bgBuildings = [];
+for (let i = 0; i < 20; i++) {
+  bgBuildings.push({
+    x: i * 0.06,
+    w: 0.02 + Math.random() * 0.04,
+    h: 0.08 + Math.random() * 0.2,
+    color: `hsl(${230 + Math.random() * 30}, 30%, ${12 + Math.random() * 10}%)`,
+  });
+}
+
+// --- Scale helper ---
+function getScale() {
+  return Math.min(canvas.width, canvas.height) / 45;
+}
+
+// --- Init / Reset ---
+function initGame() {
+  groundY = canvas.height * GROUND_Y_RATIO;
+  playerX = canvas.width * PLAYER_X_RATIO;
+  scrollSpeed = BASE_SCROLL_SPEED;
+  score = 0;
+  gameState = 'menu';
+  stateTimer = 0;
+  invincibleTimer = 0;
+  obstacles = [];
+  particles = [];
+
+  stick.x = playerX;
+  stick.y = groundY;
+  stick.vy = 0;
+  stick.onGround = true;
+  stick.runPhase = 0;
+  stick.parts = getPartTemplates(getScale());
+  stick.brokenParts = [];
+}
+
+function startGame() {
+  groundY = canvas.height * GROUND_Y_RATIO;
+  playerX = canvas.width * PLAYER_X_RATIO;
+  scrollSpeed = BASE_SCROLL_SPEED;
+  score = 0;
+  gameState = 'running';
+  stateTimer = 0;
+  invincibleTimer = 0;
+  obstacles = [];
+  particles = [];
+
+  stick.x = playerX;
+  stick.y = groundY;
+  stick.vy = 0;
+  stick.onGround = true;
+  stick.runPhase = 0;
+  stick.parts = getPartTemplates(getScale());
+  stick.brokenParts = [];
+
+  // Spawn initial obstacles
+  let ox = canvas.width + 200;
+  for (let i = 0; i < 3; i++) {
+    spawnObstacle(ox);
+    ox += OBSTACLE_MIN_GAP + Math.random() * (OBSTACLE_MAX_GAP - OBSTACLE_MIN_GAP);
+  }
+}
+
+// --- Input ---
+let jumpRequested = false;
+
+function onInput(e) {
   e.preventDefault();
-  pointer.isDown = false;
-  hasTarget = false;
+  if (gameState === 'menu') {
+    startGame();
+    return;
+  }
+  if (gameState === 'running' || gameState === 'invincible') {
+    jumpRequested = true;
+  }
 }
 
-// Touch events
-renderer.domElement.addEventListener('touchstart', onPointerDown, { passive: false });
-renderer.domElement.addEventListener('touchmove', onPointerMove, { passive: false });
-renderer.domElement.addEventListener('touchend', onPointerUp, { passive: false });
-renderer.domElement.addEventListener('touchcancel', onPointerUp, { passive: false });
-
-// Mouse events (for desktop testing)
-renderer.domElement.addEventListener('mousedown', onPointerDown);
-renderer.domElement.addEventListener('mousemove', onPointerMove);
-renderer.domElement.addEventListener('mouseup', onPointerUp);
-renderer.domElement.addEventListener('mouseleave', onPointerUp);
-
-// ============================================================
-// Movement
-// ============================================================
-const MOVE_SPEED = 5.0; // units per second
-const ROTATION_SPEED = 10.0;
-const STOP_DISTANCE = 0.2;
-const BOUNDS = 18; // half-size of playable area
-
-function moveStickman(dt) {
-  if (!hasTarget) return false;
-
-  const dx = targetPos.x - stickman.position.x;
-  const dz = targetPos.z - stickman.position.z;
-  const dist = Math.sqrt(dx * dx + dz * dz);
-
-  if (dist < STOP_DISTANCE) return false;
-
-  // Rotate toward target
-  const targetAngle = Math.atan2(dx, dz);
-  let currentAngle = stickman.rotation.y;
-  let angleDiff = targetAngle - currentAngle;
-
-  // Normalize angle difference to [-PI, PI]
-  while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-  while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-
-  stickman.rotation.y += angleDiff * Math.min(1, ROTATION_SPEED * dt);
-
-  // Move toward target
-  const step = Math.min(dist, MOVE_SPEED * dt);
-  stickman.position.x += (dx / dist) * step;
-  stickman.position.z += (dz / dist) * step;
-
-  // Clamp to bounds
-  stickman.position.x = Math.max(-BOUNDS, Math.min(BOUNDS, stickman.position.x));
-  stickman.position.z = Math.max(-BOUNDS, Math.min(BOUNDS, stickman.position.z));
-
-  return true;
-}
-
-// ============================================================
-// Camera follow
-// ============================================================
-const cameraOffset = new THREE.Vector3(0, 6, 12);
-const cameraLookOffset = new THREE.Vector3(0, 1.5, 0);
-
-function updateCamera(dt) {
-  const desiredPos = stickman.position.clone().add(cameraOffset);
-  camera.position.lerp(desiredPos, Math.min(1, 3 * dt));
-
-  const lookTarget = stickman.position.clone().add(cameraLookOffset);
-  camera.lookAt(lookTarget);
-}
-
-// ============================================================
-// Decorations (some simple trees / rocks)
-// ============================================================
-function createTree(x, z) {
-  const group = new THREE.Group();
-
-  // Trunk
-  const trunkGeo = new THREE.CylinderGeometry(0.15, 0.2, 1.5, 8);
-  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x8d6e63 });
-  const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-  trunk.position.y = 0.75;
-  trunk.castShadow = true;
-  group.add(trunk);
-
-  // Foliage
-  const foliageGeo = new THREE.SphereGeometry(0.8, 8, 8);
-  const foliageMat = new THREE.MeshStandardMaterial({ color: 0x2e7d32 });
-  const foliage = new THREE.Mesh(foliageGeo, foliageMat);
-  foliage.position.y = 2.0;
-  foliage.castShadow = true;
-  group.add(foliage);
-
-  group.position.set(x, 0, z);
-  return group;
-}
-
-function createRock(x, z, scale) {
-  const geo = new THREE.DodecahedronGeometry(0.4 * scale, 0);
-  const mat = new THREE.MeshStandardMaterial({ color: 0x9e9e9e, roughness: 0.9 });
-  const rock = new THREE.Mesh(geo, mat);
-  rock.position.set(x, 0.2 * scale, z);
-  rock.rotation.set(Math.random(), Math.random(), Math.random());
-  rock.castShadow = true;
-  return rock;
-}
-
-// Place some trees and rocks around the scene
-const decorations = [
-  createTree(-5, -4),
-  createTree(6, -6),
-  createTree(-8, 3),
-  createTree(4, 7),
-  createTree(-3, 9),
-  createTree(9, -2),
-  createTree(-7, -8),
-  createRock(3, -3, 1),
-  createRock(-4, 5, 1.5),
-  createRock(7, 4, 0.8),
-  createRock(-6, -6, 1.2),
-  createRock(2, 8, 1),
-];
-decorations.forEach((d) => scene.add(d));
-
-// ============================================================
-// Animation loop
-// ============================================================
-const clock = new THREE.Clock();
-
-function animate() {
-  requestAnimationFrame(animate);
-
-  const dt = Math.min(clock.getDelta(), 0.05); // cap delta
-
-  const isMoving = moveStickman(dt);
-  animateWalk(dt, isMoving);
-  updateCamera(dt);
-
-  renderer.render(scene, camera);
-}
-
-animate();
-
-// ============================================================
-// Resize handler
-// ============================================================
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+canvas.addEventListener('touchstart', onInput, { passive: false });
+canvas.addEventListener('mousedown', onInput);
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') {
+    e.preventDefault();
+    if (gameState === 'menu') { startGame(); return; }
+    if (gameState === 'running' || gameState === 'invincible') jumpRequested = true;
+  }
 });
+
+// --- Break apart ---
+function breakApart() {
+  gameState = 'breaking';
+  stateTimer = 0;
+  emitParticles(stick.x, stick.y - getScale() * 3);
+
+  const scale = getScale();
+  stick.brokenParts = stick.parts.map(p => ({
+    ...p,
+    bx: stick.x + p.ox,
+    by: stick.y + p.oy,
+    bvx: (Math.random() - 0.5) * 500,
+    bvy: -300 - Math.random() * 400,
+    angle: 0,
+    angVel: (Math.random() - 0.5) * 15,
+  }));
+}
+
+// --- Collision detection ---
+function checkCollision() {
+  const scale = getScale();
+  // Stickman bounding box (rough)
+  const sx = stick.x - scale * 0.8;
+  const sy = stick.y - scale * 5.8;
+  const sw = scale * 1.6;
+  const sh = scale * 5.8;
+
+  for (const obs of obstacles) {
+    // AABB test
+    if (sx < obs.x + obs.w && sx + sw > obs.x &&
+        sy < obs.y + obs.h && sy + sh > obs.y) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// --- Update ---
+let lastTime = 0;
+let nextObstacleX = 0;
+
+function update(dt) {
+  const scale = getScale();
+  groundY = canvas.height * GROUND_Y_RATIO;
+  playerX = canvas.width * PLAYER_X_RATIO;
+
+  // Update particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 600 * dt;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  if (gameState === 'menu') return;
+
+  if (gameState === 'running' || gameState === 'invincible') {
+    // Speed up over time
+    scrollSpeed += SPEED_INCREMENT * dt * 60;
+
+    // Jump
+    if (jumpRequested && stick.onGround) {
+      stick.vy = JUMP_FORCE;
+      stick.onGround = false;
+    }
+    jumpRequested = false;
+
+    // Gravity
+    if (!stick.onGround) {
+      stick.vy += GRAVITY * dt;
+      stick.y += stick.vy * dt;
+      if (stick.y >= groundY) {
+        stick.y = groundY;
+        stick.vy = 0;
+        stick.onGround = true;
+      }
+    }
+
+    // Run animation phase
+    if (stick.onGround) {
+      stick.runPhase += dt * 10;
+    }
+
+    // Update stickman position
+    stick.x = playerX;
+    stick.parts = getPartTemplates(scale);
+
+    // Scroll obstacles
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      obstacles[i].x -= scrollSpeed * dt;
+      obstacles[i].phase += dt * 8;
+      if (obstacles[i].x + obstacles[i].w < -50) {
+        obstacles.splice(i, 1);
+        score++;
+      }
+    }
+
+    // Spawn new obstacles
+    const rightEdge = obstacles.length > 0 ? Math.max(...obstacles.map(o => o.x + o.w)) : 0;
+    if (obstacles.length === 0 || rightEdge < canvas.width + 100) {
+      const gap = OBSTACLE_MIN_GAP + Math.random() * (OBSTACLE_MAX_GAP - OBSTACLE_MIN_GAP);
+      const spawnX = obstacles.length > 0 ? rightEdge + gap : canvas.width + gap;
+      spawnObstacle(spawnX);
+    }
+
+    // Collision
+    if (gameState === 'running' && checkCollision()) {
+      breakApart();
+      return;
+    }
+
+    // Invincibility timer
+    if (gameState === 'invincible') {
+      invincibleTimer -= dt;
+      if (invincibleTimer <= 0) {
+        gameState = 'running';
+      }
+    }
+  }
+
+  if (gameState === 'breaking') {
+    stateTimer += dt;
+    // Animate broken parts with physics
+    for (const p of stick.brokenParts) {
+      p.bvx *= 0.99;
+      p.bvy += GRAVITY * 0.5 * dt;
+      p.bx += p.bvx * dt;
+      p.by += p.bvy * dt;
+      p.angle += p.angVel * dt;
+      // Bounce off ground
+      if (p.by > groundY) {
+        p.by = groundY;
+        p.bvy *= -0.4;
+        p.bvx *= 0.7;
+        p.angVel *= 0.7;
+      }
+    }
+
+    // Scroll obstacles even while breaking
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      obstacles[i].x -= scrollSpeed * 0.3 * dt;
+      if (obstacles[i].x + obstacles[i].w < -50) {
+        obstacles.splice(i, 1);
+      }
+    }
+
+    if (stateTimer > 1.0) {
+      gameState = 'reassembling';
+      stateTimer = 0;
+    }
+  }
+
+  if (gameState === 'reassembling') {
+    stateTimer += dt;
+    const t = Math.min(stateTimer / REASSEMBLE_TIME, 1);
+    const ease = t * t * (3 - 2 * t); // smoothstep
+
+    // Lerp parts back to correct positions
+    for (const p of stick.brokenParts) {
+      const targetX = stick.x + p.ox;
+      const targetY = groundY + p.oy;
+      p.bx = p.bx + (targetX - p.bx) * ease * 0.15;
+      p.by = p.by + (targetY - p.by) * ease * 0.15;
+      p.angle *= (1 - ease * 0.1);
+    }
+
+    if (t >= 1) {
+      gameState = 'invincible';
+      invincibleTimer = INVINCIBLE_TIME;
+      stick.y = groundY;
+      stick.vy = 0;
+      stick.onGround = true;
+      stick.brokenParts = [];
+      if (score > highScore) highScore = score;
+      emitParticles(stick.x, stick.y - scale * 3);
+    }
+  }
+}
+
+// --- Draw ---
+function drawBackground() {
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, '#0a0a2e');
+  grad.addColorStop(0.6, '#16213e');
+  grad.addColorStop(1, '#1a1a3e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Stars
+  for (const star of bgStars) {
+    ctx.fillStyle = `rgba(255,255,255,${star.bright * 0.6})`;
+    ctx.fillRect(star.x * canvas.width, star.y * canvas.height, star.size, star.size);
+  }
+
+  // Buildings (parallax)
+  const scroll = (score * 0.01) % 1;
+  for (const b of bgBuildings) {
+    const bx = ((b.x - scroll * 0.3) % 1.2) * canvas.width;
+    const bw = b.w * canvas.width;
+    const bh = b.h * canvas.height;
+    ctx.fillStyle = b.color;
+    ctx.fillRect(bx, groundY - bh, bw, bh);
+    // Windows
+    ctx.fillStyle = 'rgba(255, 200, 50, 0.15)';
+    for (let wy = groundY - bh + 8; wy < groundY - 8; wy += 14) {
+      for (let wx = bx + 4; wx < bx + bw - 4; wx += 10) {
+        if (Math.random() > 0.3) ctx.fillRect(wx, wy, 5, 7);
+      }
+    }
+  }
+}
+
+function drawGround() {
+  // Ground
+  ctx.fillStyle = '#2d2d5e';
+  ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+
+  // Ground line
+  ctx.strokeStyle = '#5555aa';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, groundY);
+  ctx.lineTo(canvas.width, groundY);
+  ctx.stroke();
+
+  // Ground pattern
+  ctx.strokeStyle = 'rgba(85, 85, 170, 0.2)';
+  ctx.lineWidth = 1;
+  const lineSpacing = 30;
+  const offset = (Date.now() * 0.05 * (scrollSpeed / BASE_SCROLL_SPEED)) % lineSpacing;
+  for (let x = -offset; x < canvas.width; x += lineSpacing) {
+    ctx.beginPath();
+    ctx.moveTo(x, groundY);
+    ctx.lineTo(x - 20, canvas.height);
+    ctx.stroke();
+  }
+}
+
+function drawStickman() {
+  const scale = getScale();
+  const x = stick.x;
+  const y = stick.y;
+  const phase = stick.runPhase;
+  const isRunning = stick.onGround && (gameState === 'running' || gameState === 'invincible');
+
+  // Blinking for invincibility
+  if (gameState === 'invincible' && Math.floor(invincibleTimer * 10) % 2 === 0) return;
+
+  const legSwing = isRunning ? Math.sin(phase) * 0.5 : 0;
+  const armSwing = isRunning ? Math.sin(phase) * 0.4 : 0;
+  const bounce = isRunning ? Math.abs(Math.sin(phase)) * scale * 0.2 : 0;
+  const by = y - bounce;
+
+  ctx.strokeStyle = '#ffffff';
+  ctx.fillStyle = '#ffffff';
+  ctx.lineWidth = Math.max(3, scale * 0.3);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // Head
+  ctx.beginPath();
+  ctx.arc(x, by - scale * 5.3, scale * 0.55, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Eyes
+  const eyeScale = scale * 0.12;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(x - scale * 0.2, by - scale * 5.4, eyeScale, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + scale * 0.2, by - scale * 5.4, eyeScale, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pupils
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(x - scale * 0.15, by - scale * 5.4, eyeScale * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + scale * 0.25, by - scale * 5.4, eyeScale * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = '#ffffff';
+
+  // Body
+  ctx.beginPath();
+  ctx.moveTo(x, by - scale * 4.7);
+  ctx.lineTo(x, by - scale * 2.6);
+  ctx.stroke();
+
+  // Left arm
+  const laAngle = -Math.PI / 6 + armSwing;
+  ctx.beginPath();
+  ctx.moveTo(x, by - scale * 4.4);
+  ctx.lineTo(x + Math.sin(laAngle) * scale * 1.2, by - scale * 4.4 + Math.cos(laAngle) * scale * 1.2);
+  ctx.stroke();
+
+  // Right arm
+  const raAngle = Math.PI / 6 - armSwing;
+  ctx.beginPath();
+  ctx.moveTo(x, by - scale * 4.4);
+  ctx.lineTo(x + Math.sin(raAngle) * scale * 1.2, by - scale * 4.4 + Math.cos(raAngle) * scale * 1.2);
+  ctx.stroke();
+
+  // Left leg
+  const llAngle = -0.15 + legSwing;
+  const lKneeX = x + Math.sin(llAngle) * scale * 1.3;
+  const lKneeY = by - scale * 2.6 + Math.cos(llAngle) * scale * 1.3;
+  ctx.beginPath();
+  ctx.moveTo(x, by - scale * 2.6);
+  ctx.lineTo(lKneeX, lKneeY);
+  ctx.lineTo(lKneeX + Math.sin(llAngle * 0.5) * scale * 1.2, lKneeY + Math.cos(llAngle * 0.3) * scale * 1.2);
+  ctx.stroke();
+
+  // Right leg
+  const rlAngle = 0.15 - legSwing;
+  const rKneeX = x + Math.sin(rlAngle) * scale * 1.3;
+  const rKneeY = by - scale * 2.6 + Math.cos(rlAngle) * scale * 1.3;
+  ctx.beginPath();
+  ctx.moveTo(x, by - scale * 2.6);
+  ctx.lineTo(rKneeX, rKneeY);
+  ctx.lineTo(rKneeX + Math.sin(rlAngle * 0.5) * scale * 1.2, rKneeY + Math.cos(rlAngle * 0.3) * scale * 1.2);
+  ctx.stroke();
+}
+
+function drawBrokenParts() {
+  const scale = getScale();
+  ctx.strokeStyle = '#ffffff';
+  ctx.fillStyle = '#ffffff';
+  ctx.lineWidth = Math.max(3, scale * 0.3);
+  ctx.lineCap = 'round';
+
+  for (const p of stick.brokenParts) {
+    ctx.save();
+    ctx.translate(p.bx, p.by);
+    ctx.rotate(p.angle);
+
+    if (p.type === 'circle') {
+      // Head
+      ctx.beginPath();
+      ctx.arc(0, 0, p.r, 0, Math.PI * 2);
+      ctx.stroke();
+      // Eyes
+      const es = p.r * 0.22;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(-p.r * 0.35, -p.r * 0.15, es, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(p.r * 0.35, -p.r * 0.15, es, 0, Math.PI * 2);
+      ctx.fill();
+      // X eyes (dazed)
+      ctx.strokeStyle = '#ff4444';
+      ctx.lineWidth = 2;
+      const cx1 = -p.r * 0.35, cy1 = -p.r * 0.15;
+      ctx.beginPath();
+      ctx.moveTo(cx1 - es, cy1 - es); ctx.lineTo(cx1 + es, cy1 + es);
+      ctx.moveTo(cx1 + es, cy1 - es); ctx.lineTo(cx1 - es, cy1 + es);
+      ctx.stroke();
+      const cx2 = p.r * 0.35, cy2 = -p.r * 0.15;
+      ctx.beginPath();
+      ctx.moveTo(cx2 - es, cy2 - es); ctx.lineTo(cx2 + es, cy2 + es);
+      ctx.moveTo(cx2 + es, cy2 - es); ctx.lineTo(cx2 - es, cy2 + es);
+      ctx.stroke();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(3, scale * 0.3);
+    } else {
+      // Line (limb)
+      ctx.beginPath();
+      ctx.moveTo(0, -p.h * 0.5);
+      ctx.lineTo(0, p.h * 0.5);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+}
+
+function drawObstacles() {
+  const scale = getScale();
+  for (const obs of obstacles) {
+    if (obs.type === 'spike') {
+      // Triangle spike
+      ctx.fillStyle = '#ff3333';
+      ctx.strokeStyle = '#ff6666';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(obs.x + obs.w / 2, obs.y);
+      ctx.lineTo(obs.x + obs.w, obs.y + obs.h);
+      ctx.lineTo(obs.x, obs.y + obs.h);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      // Glow
+      ctx.shadowColor = '#ff3333';
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    } else if (obs.type === 'box') {
+      // Crate
+      ctx.fillStyle = '#8B4513';
+      ctx.strokeStyle = '#D2691E';
+      ctx.lineWidth = 2;
+      ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+      ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+      // X pattern
+      ctx.strokeStyle = 'rgba(210,105,30,0.5)';
+      ctx.beginPath();
+      ctx.moveTo(obs.x, obs.y);
+      ctx.lineTo(obs.x + obs.w, obs.y + obs.h);
+      ctx.moveTo(obs.x + obs.w, obs.y);
+      ctx.lineTo(obs.x, obs.y + obs.h);
+      ctx.stroke();
+    } else if (obs.type === 'sawblade') {
+      // Rotating saw
+      const cx = obs.x + obs.w / 2;
+      const cy = obs.y + obs.h / 2;
+      const r = obs.w / 2;
+      const teeth = 8;
+      ctx.fillStyle = '#888';
+      ctx.strokeStyle = '#ccc';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < teeth * 2; i++) {
+        const a = (i / (teeth * 2)) * Math.PI * 2 + obs.phase;
+        const tr = i % 2 === 0 ? r : r * 0.7;
+        const tx = cx + Math.cos(a) * tr;
+        const ty = cy + Math.sin(a) * tr;
+        if (i === 0) ctx.moveTo(tx, ty);
+        else ctx.lineTo(tx, ty);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      // Center
+      ctx.fillStyle = '#555';
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = alpha;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawUI() {
+  const scale = getScale();
+
+  // Score
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${Math.max(18, scale * 1.5)}px 'Segoe UI', sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.fillText(`Score: ${score}`, 16, 36);
+  ctx.fillText(`Best: ${highScore}`, 16, 36 + Math.max(22, scale * 1.8));
+
+  if (gameState === 'menu') {
+    // Title
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold ${Math.max(32, scale * 3)}px 'Segoe UI', sans-serif`;
+    ctx.fillText('StickMan vs Boss', canvas.width / 2, canvas.height * 0.3);
+
+    ctx.font = `${Math.max(16, scale * 1.2)}px 'Segoe UI', sans-serif`;
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText('Нажмите чтобы начать', canvas.width / 2, canvas.height * 0.3 + scale * 3.5);
+    ctx.fillText('Тап / Пробел — прыжок', canvas.width / 2, canvas.height * 0.3 + scale * 5.5);
+
+    // Draw idle stickman in menu
+    drawStickman();
+  }
+
+  if (gameState === 'breaking' || gameState === 'reassembling') {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff4444';
+    ctx.font = `bold ${Math.max(24, scale * 2)}px 'Segoe UI', sans-serif`;
+    if (gameState === 'breaking') {
+      ctx.fillText('CRASH!', canvas.width / 2, canvas.height * 0.25);
+    } else {
+      ctx.fillStyle = '#44ff44';
+      ctx.fillText('Reassembling...', canvas.width / 2, canvas.height * 0.25);
+    }
+  }
+}
+
+// --- Main loop ---
+function gameLoop(timestamp) {
+  if (!lastTime) lastTime = timestamp;
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+
+  update(dt);
+
+  // Draw
+  drawBackground();
+  drawGround();
+  drawObstacles();
+
+  if (gameState === 'breaking' || gameState === 'reassembling') {
+    drawBrokenParts();
+  } else {
+    drawStickman();
+  }
+
+  drawParticles();
+  drawUI();
+
+  requestAnimationFrame(gameLoop);
+}
+
+initGame();
+requestAnimationFrame(gameLoop);
