@@ -18,10 +18,14 @@ const GRAVITY = 2200;
 const JUMP_FORCE = -750;
 const GROUND_Y_RATIO = 0.78;      // ground line as fraction of canvas height
 const PLAYER_X_RATIO = 0.18;      // stickman horizontal position
-const BASE_SCROLL_SPEED = 320;
-const SPEED_INCREMENT = 0.4;       // speed-up per second
-const OBSTACLE_MIN_GAP = 280;
-const OBSTACLE_MAX_GAP = 500;
+const BASE_SCROLL_SPEED = 180;
+const MAX_SCROLL_SPEED = 700;
+const SPEED_INCREMENT = 1.2;       // speed-up per second
+const OBSTACLE_MIN_GAP_START = 420;
+const OBSTACLE_MAX_GAP_START = 600;
+const OBSTACLE_MIN_GAP_END = 180;
+const OBSTACLE_MAX_GAP_END = 300;
+const DIFFICULTY_RAMP_TIME = 120;  // seconds to reach max difficulty
 const REASSEMBLE_TIME = 1.2;       // seconds to reassemble
 const INVINCIBLE_TIME = 1.5;       // post-reassemble invincibility
 const PARTICLE_COUNT = 12;
@@ -33,6 +37,21 @@ let score, highScore = 0;
 let gameState; // 'menu' | 'running' | 'breaking' | 'reassembling' | 'invincible'
 let stateTimer;
 let invincibleTimer;
+let elapsedTime;  // total play time in seconds
+
+// --- Difficulty curve ---
+function getDifficulty() {
+  const t = Math.min(elapsedTime / DIFFICULTY_RAMP_TIME, 1);
+  const ease = t * (2 - t); // ease-out quad — fast start, slow finish
+  return ease;
+}
+
+function getCurrentGap() {
+  const d = getDifficulty();
+  const minGap = OBSTACLE_MIN_GAP_START + (OBSTACLE_MIN_GAP_END - OBSTACLE_MIN_GAP_START) * d;
+  const maxGap = OBSTACLE_MAX_GAP_START + (OBSTACLE_MAX_GAP_END - OBSTACLE_MAX_GAP_START) * d;
+  return minGap + Math.random() * (maxGap - minGap);
+}
 
 // --- Stickman ---
 const stick = {
@@ -136,6 +155,7 @@ function initGame() {
   playerX = canvas.width * PLAYER_X_RATIO;
   scrollSpeed = BASE_SCROLL_SPEED;
   score = 0;
+  elapsedTime = 0;
   gameState = 'menu';
   stateTimer = 0;
   invincibleTimer = 0;
@@ -156,6 +176,7 @@ function startGame() {
   playerX = canvas.width * PLAYER_X_RATIO;
   scrollSpeed = BASE_SCROLL_SPEED;
   score = 0;
+  elapsedTime = 0;
   gameState = 'running';
   stateTimer = 0;
   invincibleTimer = 0;
@@ -171,10 +192,10 @@ function startGame() {
   stick.brokenParts = [];
 
   // Spawn initial obstacles
-  let ox = canvas.width + 200;
+  let ox = canvas.width + 300;
   for (let i = 0; i < 3; i++) {
     spawnObstacle(ox);
-    ox += OBSTACLE_MIN_GAP + Math.random() * (OBSTACLE_MAX_GAP - OBSTACLE_MIN_GAP);
+    ox += getCurrentGap();
   }
 }
 
@@ -261,8 +282,9 @@ function update(dt) {
   if (gameState === 'menu') return;
 
   if (gameState === 'running' || gameState === 'invincible') {
-    // Speed up over time
-    scrollSpeed += SPEED_INCREMENT * dt * 60;
+    // Track play time & ramp speed
+    elapsedTime += dt;
+    scrollSpeed = BASE_SCROLL_SPEED + (MAX_SCROLL_SPEED - BASE_SCROLL_SPEED) * getDifficulty();
 
     // Jump
     if (jumpRequested && stick.onGround) {
@@ -282,9 +304,9 @@ function update(dt) {
       }
     }
 
-    // Run animation phase
+    // Run animation phase (faster legs at higher speed)
     if (stick.onGround) {
-      stick.runPhase += dt * 10;
+      stick.runPhase += dt * (8 + 8 * getDifficulty());
     }
 
     // Update stickman position
@@ -304,7 +326,7 @@ function update(dt) {
     // Spawn new obstacles
     const rightEdge = obstacles.length > 0 ? Math.max(...obstacles.map(o => o.x + o.w)) : 0;
     if (obstacles.length === 0 || rightEdge < canvas.width + 100) {
-      const gap = OBSTACLE_MIN_GAP + Math.random() * (OBSTACLE_MAX_GAP - OBSTACLE_MIN_GAP);
+      const gap = getCurrentGap();
       const spawnX = obstacles.length > 0 ? rightEdge + gap : canvas.width + gap;
       spawnObstacle(spawnX);
     }
@@ -668,6 +690,32 @@ function drawUI() {
   ctx.textAlign = 'left';
   ctx.fillText(`Score: ${score}`, 16, 36);
   ctx.fillText(`Best: ${highScore}`, 16, 36 + Math.max(22, scale * 1.8));
+
+  // Speed indicator (only during gameplay)
+  if (gameState !== 'menu') {
+    const speedPct = Math.round(((scrollSpeed - BASE_SCROLL_SPEED) / (MAX_SCROLL_SPEED - BASE_SCROLL_SPEED)) * 100);
+    const barW = Math.max(80, scale * 8);
+    const barH = Math.max(8, scale * 0.5);
+    const barX = canvas.width - barW - 16;
+    const barY = 24;
+    // Background
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(barX, barY, barW, barH);
+    // Fill with gradient from green to red
+    const fillW = barW * (speedPct / 100);
+    const barGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    barGrad.addColorStop(0, '#44ff44');
+    barGrad.addColorStop(0.5, '#ffff44');
+    barGrad.addColorStop(1, '#ff4444');
+    ctx.fillStyle = barGrad;
+    ctx.fillRect(barX, barY, fillW, barH);
+    // Label
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = `${Math.max(12, scale * 0.8)}px 'Segoe UI', sans-serif`;
+    ctx.textAlign = 'right';
+    ctx.fillText(`Speed x${(scrollSpeed / BASE_SCROLL_SPEED).toFixed(1)}`, barX + barW, barY - 6);
+    ctx.textAlign = 'left';
+  }
 
   if (gameState === 'menu') {
     // Title
